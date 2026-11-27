@@ -39,14 +39,39 @@ class _LoginPageState extends State<LoginPage> {
     );
     if (!mounted) return;
     if (error != null) {
+      final needsVerification = error.toLowerCase().contains('diverifikasi') ||
+          error.toLowerCase().contains('konfirmasi');
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error)),
+        SnackBar(
+          content: Text(error),
+          duration: const Duration(seconds: 5),
+          action: needsVerification
+              ? SnackBarAction(
+                  label: 'Kirim Ulang',
+                  onPressed: _handleResendConfirmation,
+                )
+              : null,
+        ),
       );
       return;
     }
     Navigator.of(context).pushReplacement(
       MaterialPageRoute<void>(
         builder: (_) => const MainShell(),
+      ),
+    );
+  }
+
+  Future<void> _handleResendConfirmation() async {
+    final appState = AppStateScope.of(context);
+    final error = await appState.resendConfirmationEmail(_emailController.text);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          error ??
+              'Email konfirmasi telah dikirim ulang ke ${_emailController.text.trim()}. Periksa kotak masuk atau folder spam.',
+        ),
       ),
     );
   }
@@ -173,20 +198,26 @@ class _LoginPageState extends State<LoginPage> {
                           },
                         ),
                         const SizedBox(height: 10),
-                        Align(
-                          alignment: Alignment.centerRight,
-                          child: TextButton(
-                            onPressed: () {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text(
-                                    'Fitur reset password akan tersedia pada tahap integrasi akun.',
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            TextButton(
+                              onPressed: _handleResendConfirmation,
+                              child: const Text('Kirim ulang verifikasi'),
+                            ),
+                            TextButton(
+                              onPressed: () {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text(
+                                      'Fitur reset password akan tersedia pada tahap integrasi akun.',
+                                    ),
                                   ),
-                                ),
-                              );
-                            },
-                            child: const Text('Lupa password?'),
-                          ),
+                                );
+                              },
+                              child: const Text('Lupa password?'),
+                            ),
+                          ],
                         ),
                         const SizedBox(height: 8),
                         ElevatedButton.icon(

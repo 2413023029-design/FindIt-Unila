@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:material_ui/material_ui.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -17,9 +19,13 @@ class AppState extends ChangeNotifier {
         _claims = DummyData.initialClaims();
 
   final SupabaseService _supabase;
+  StreamSubscription<AuthState>? _authSubscription;
 
   UserProfile _currentUser;
   bool _isLoggedIn = false;
+  bool _handlingManualAuth = false;
+  bool _pendingDeepLinkSignIn = false;
+  String? _pendingAuthError;
   List<ItemReport> _reports;
   List<ClaimRequest> _claims;
 
@@ -32,11 +38,74 @@ class AppState extends ChangeNotifier {
   UserProfile get currentUser => _currentUser;
   bool get isLoggedIn => _isLoggedIn;
   bool get isUsingSupabase => _supabase.isActive;
+  bool get pendingDeepLinkSignIn => _pendingDeepLinkSignIn;
+  String? get pendingAuthError => _pendingAuthError;
   int get currentTabIndex => _currentTabIndex;
   String get searchQuery => _searchQuery;
   String? get selectedCategory => _selectedCategory;
   String? get selectedFaculty => _selectedFaculty;
   ReportType? get selectedType => _selectedType;
+
+  void startAuthListener() {
+    if (!_supabase.isActive || _authSubscription != null) return;
+    _authSubscription = _supabase.onAuthStateChange.listen(
+      (authState) {
+        unawaited(_handleAuthStateEvent(authState));
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        _pendingAuthError = _supabase.formatAuthError(error);
+        notifyListeners();
+      },
+    );
+  }
+
+  bool consumeDeepLinkSignIn() {
+    if (!_pendingDeepLinkSignIn) return false;
+    _pendingDeepLinkSignIn = false;
+    return true;
+  }
+
+  String? consumeAuthError() {
+    final error = _pendingAuthError;
+    _pendingAuthError = null;
+    return error;
+  }
+
+  Future<void> _handleAuthStateEvent(AuthState authState) async {
+    if (authState.event == AuthChangeEvent.signedIn &&
+        authState.session != null) {
+      if (_handlingManualAuth || _isLoggedIn) return;
+      try {
+        final user = authState.session!.user;
+        _currentUser = await _supabase.ensureProfileForUser(user);
+        _isLoggedIn = true;
+        _currentTabIndex = 0;
+        _pendingDeepLinkSignIn = true;
+        await _syncRemoteData(user.id);
+        notifyListeners();
+      } catch (e) {
+        _pendingAuthError = _supabase.formatAuthError(e);
+        notifyListeners();
+      }
+      return;
+    }
+
+    if (authState.event == AuthChangeEvent.signedOut &&
+        !_handlingManualAuth &&
+        _isLoggedIn) {
+      _isLoggedIn = false;
+      _reports = [];
+      _claims = [];
+      _currentUser = DummyData.defaultUser;
+      notifyListeners();
+    }
+  }
+
+  @override
+  void dispose() {
+    unawaited(_authSubscription?.cancel());
+    super.dispose();
+  }
 
   List<ItemReport> get allReports => List.unmodifiable(_reports);
 
@@ -173,6 +242,7 @@ class AppState extends ChangeNotifier {
     String password = '',
   }) async {
     if (_supabase.isActive) {
+      _handlingManualAuth = true;
       try {
         final profile = await _supabase.signIn(
           email: email,
@@ -184,10 +254,10 @@ class AppState extends ChangeNotifier {
         await _syncRemoteData(profile.id);
         notifyListeners();
         return null;
-      } on AuthException catch (e) {
-        return e.message;
       } catch (e) {
-        return 'Gagal terhubung ke Supabase: $e';
+        return _supabase.formatAuthError(e);
+      } finally {
+        _handlingManualAuth = false;
       }
     }
 
@@ -214,6 +284,7 @@ class AppState extends ChangeNotifier {
     String password = '',
   }) async {
     if (_supabase.isActive) {
+      _handlingManualAuth = true;
       try {
         final profile = await _supabase.signUp(
           fullName: fullName,
@@ -230,10 +301,10 @@ class AppState extends ChangeNotifier {
         await _syncRemoteData(profile.id);
         notifyListeners();
         return null;
-      } on AuthException catch (e) {
-        return e.message;
       } catch (e) {
-        return 'Gagal mendaftar ke Supabase: $e';
+        return _supabase.formatAuthError(e);
+      } finally {
+        _handlingManualAuth = false;
       }
     }
 
@@ -250,6 +321,22 @@ class AppState extends ChangeNotifier {
     _currentTabIndex = 0;
     notifyListeners();
     return null;
+  }
+
+  Future<String?> resendConfirmationEmail(String email) async {
+    final cleanEmail = email.trim();
+    if (cleanEmail.isEmpty || !cleanEmail.contains('@')) {
+      return 'Masukkan alamat email yang valid terlebih dahulu.';
+    }
+    if (!_supabase.isActive) {
+      return 'Kirim ulang email verifikasi memerlukan konfigurasi Supabase (--dart-define).';
+    }
+    try {
+      await _supabase.resendConfirmationEmail(cleanEmail);
+      return null;
+    } catch (e) {
+      return _supabase.formatAuthError(e);
+    }
   }
 
   Future<void> logout() async {

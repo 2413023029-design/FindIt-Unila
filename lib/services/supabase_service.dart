@@ -24,6 +24,10 @@ class SupabaseService {
 
   Session? get currentSession => isActive ? _client.auth.currentSession : null;
 
+  Stream<AuthState> get onAuthStateChange => isActive
+      ? _client.auth.onAuthStateChange
+      : const Stream<AuthState>.empty();
+
   /// Menginisialisasi Supabase apabila --dart-define SUPABASE_URL dan SUPABASE_ANON_KEY tersedia.
   Future<void> initialize() async {
     if (_isInitialized || !SupabaseConfig.isConfigured) return;
@@ -31,8 +35,37 @@ class SupabaseService {
     await Supabase.initialize(
       url: SupabaseConfig.url,
       publishableKey: SupabaseConfig.anonKey,
+      authOptions: const FlutterAuthClientOptions(
+        authFlowType: AuthFlowType.pkce,
+        detectSessionInUri: true,
+      ),
     );
     _isInitialized = true;
+  }
+
+  /// Memastikan profil tersedia di tabel `profiles` tanpa menimpa data pengguna yang sudah ada.
+  Future<UserProfile> ensureProfileForUser(
+    User user, {
+    String? fallbackEmail,
+  }) async {
+    final existing = await fetchProfile(user.id);
+    if (existing != null) return existing;
+
+    final effectiveEmail = user.email ?? fallbackEmail?.trim() ?? '';
+    final fallback = UserProfile(
+      id: user.id,
+      fullName: (user.userMetadata?['full_name'] as String?) ??
+          (effectiveEmail.isNotEmpty
+              ? effectiveEmail.split('@').first
+              : 'Mahasiswa UNILA'),
+      email: effectiveEmail,
+      faculty: (user.userMetadata?['faculty'] as String?) ??
+          'Fakultas Teknik (FT)',
+      npm: (user.userMetadata?['npm'] as String?) ?? '',
+      phone: (user.userMetadata?['phone'] as String?) ?? '',
+    );
+    await upsertProfile(fallback);
+    return fallback;
   }
 
   Future<UserProfile> signIn({
@@ -48,25 +81,12 @@ class SupabaseService {
       throw const AuthException('Gagal masuk ke akun Supabase.');
     }
 
-    final existing = await fetchProfile(user.id);
-    if (existing != null) return existing;
-
-    final fallback = UserProfile(
-      id: user.id,
-      fullName: (user.userMetadata?['full_name'] as String?) ??
-          email.split('@').first,
-      email: user.email ?? email.trim(),
-      faculty: (user.userMetadata?['faculty'] as String?) ??
-          'Fakultas Teknik (FT)',
-      npm: (user.userMetadata?['npm'] as String?) ?? '',
-      phone: (user.userMetadata?['phone'] as String?) ?? '',
-    );
-    await upsertProfile(fallback);
-    return fallback;
+    return ensureProfileForUser(user, fallbackEmail: email);
   }
 
-  /// Mendaftarkan akun baru. Mengembalikan [UserProfile] jika sesi langsung aktif,
-  /// atau `null` bila Supabase mewajibkan verifikasi email terlebih dahulu.
+  /// Mendaftarkan akun baru dengan `emailRedirectTo` ke deep link aplikasi Android.
+  /// Mengembalikan [UserProfile] jika sesi langsung aktif, atau `null` bila
+  /// Supabase mewajibkan verifikasi email terlebih dahulu.
   Future<UserProfile?> signUp({
     required String fullName,
     required String email,
@@ -76,6 +96,7 @@ class SupabaseService {
     final response = await _client.auth.signUp(
       email: email.trim(),
       password: password,
+      emailRedirectTo: SupabaseConfig.authCallbackUrl,
       data: {
         'full_name': fullName.trim(),
         'faculty': faculty,
@@ -91,21 +112,58 @@ class SupabaseService {
       return null;
     }
 
-    final profile = UserProfile(
-      id: user.id,
-      fullName: fullName.trim(),
+    return ensureProfileForUser(user, fallbackEmail: email);
+  }
+
+  /// Mengirim ulang email konfirmasi pendaftaran dengan `emailRedirectTo` deep link Android.
+  Future<void> resendConfirmationEmail(String email) async {
+    await _client.auth.resend(
+      type: OtpType.signup,
       email: email.trim(),
-      faculty: faculty,
-      npm: '',
-      phone: '',
+      emailRedirectTo: SupabaseConfig.authCallbackUrl,
     );
-    await upsertProfile(profile);
-    return profile;
   }
 
   Future<void> signOut() async {
     if (!isActive) return;
     await _client.auth.signOut();
+  }
+
+  /// Mengubah pesan error Supabase Auth menjadi pesan Bahasa Indonesia yang jelas.
+  String formatAuthError(Object error) {
+    if (error is AuthException) {
+      final raw = error.message.toLowerCase();
+      final code = (error.code ?? '').toLowerCase();
+      final status = (error.statusCode ?? '').toLowerCase();
+
+      if (raw.contains('otp_expired') ||
+          code == 'otp_expired' ||
+          status == 'otp_expired' ||
+          raw.contains('expired') ||
+          raw.contains('invalid or has expired')) {
+        return 'Link konfirmasi email tidak valid atau sudah kedaluwarsa. Silakan kirim ulang email konfirmasi.';
+      }
+      if (raw.contains('email not confirmed')) {
+        return 'Email belum diverifikasi. Periksa kotak masuk/spam Anda atau kirim ulang email konfirmasi.';
+      }
+      if (raw.contains('invalid login credentials')) {
+        return 'Email atau password salah. Pastikan akun sudah terdaftar dan email sudah diverifikasi.';
+      }
+      if (raw.contains('user already registered') ||
+          raw.contains('already registered')) {
+        return 'Email sudah terdaftar. Silakan masuk atau kirim ulang email konfirmasi jika belum terverifikasi.';
+      }
+      if (raw.contains('rate limit') ||
+          raw.contains('security purposes') ||
+          raw.contains('too many requests')) {
+        return 'Terlalu banyak permintaan. Mohon tunggu sebentar sebelum mengirim ulang email.';
+      }
+      if (raw.contains('code verifier') || raw.contains('pkce')) {
+        return 'Sesi verifikasi PKCE tidak ditemukan di perangkat ini. Silakan kirim ulang email konfirmasi dari aplikasi.';
+      }
+      return error.message;
+    }
+    return 'Terjadi kesalahan autentikasi: $error';
   }
 
   Future<UserProfile?> fetchProfile(String userId) async {

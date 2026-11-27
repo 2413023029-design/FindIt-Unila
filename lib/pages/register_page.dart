@@ -46,14 +46,43 @@ class _RegisterPageState extends State<RegisterPage> {
     if (!mounted) return;
 
     if (error == 'VERIFICATION_REQUIRED') {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
+      final registeredEmail = _emailController.text.trim();
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Verifikasi Email Diperlukan'),
           content: Text(
-            'Pendaftaran berhasil! Silakan verifikasi email Anda lalu masuk.',
+            'Tautan konfirmasi telah dikirim ke $registeredEmail.\n\n'
+            'Silakan buka email Anda dan klik tautan tersebut untuk mengaktifkan akun FindIt UNILA.',
           ),
+          actions: [
+            TextButton(
+              onPressed: () async {
+                final resendError =
+                    await appState.resendConfirmationEmail(registeredEmail);
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      resendError ??
+                          'Email konfirmasi dikirim ulang ke $registeredEmail.',
+                    ),
+                  ),
+                );
+              },
+              child: const Text('Kirim Ulang Email'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(ctx).pop();
+                Navigator.of(context).pop();
+              },
+              child: const Text('Ke Halaman Login'),
+            ),
+          ],
         ),
       );
-      Navigator.of(context).pop();
       return;
     }
 
